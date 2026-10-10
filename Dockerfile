@@ -1,13 +1,15 @@
 # syntax=docker/dockerfile:1.6
-FROM golang:1.24-alpine AS builder
-WORKDIR /src
-COPY go.mod go.sum ./
+FROM golang:1.25-alpine AS builder
+WORKDIR /src/inflora-palantir
+COPY inflora-shared /src/inflora-shared
+COPY inflora-palantir/go.mod inflora-palantir/go.sum ./
 RUN go mod download
-COPY . .
+COPY inflora-palantir .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/inflora-palantir ./cmd/server
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates && addgroup -S inflora && adduser -S -G inflora inflora
 COPY --from=builder /out/inflora-palantir /usr/local/bin/inflora-palantir
-USER nonroot:nonroot
+USER inflora:inflora
 ENTRYPOINT ["/usr/local/bin/inflora-palantir"]
 EXPOSE 7001
