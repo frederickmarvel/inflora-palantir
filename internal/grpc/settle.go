@@ -118,6 +118,27 @@ func (s *TopUpServer) SettleTopUp(ctx context.Context, req *pb.SettleTopUpReques
 	if _, err := outbox.Enqueue(ctx, tx, "palantir", "donation", topup.SarumanDonationID, &topup.StreamerID, env); err != nil {
 		return nil, status.Errorf(codes.Internal, "enqueue event: %v", err)
 	}
+	// D-052 dev autosettle: the pivot stub never sends a settlement webhook,
+	// so the dev stack closes the s2 donation settlement by emitting the
+	// settled event in the same transaction as the capture. Dev-only flag;
+	// production receives the settlement webhook through the normal edge.
+	if s.DevTopupAutosettle && strings.EqualFold(s.ProviderName, "pivot") && normalized == "CAPTURED" {
+		settleEnv, settleErr := events.NewEnvelope(events.PgGatewayTopupSettled, "palantir", stringPtr(topup.StreamerID.String()), map[string]any{
+			"donation_id":           topup.SarumanDonationID.String(),
+			"intent_id":             donation.IntentID.String(),
+			"streamer_id":           topup.StreamerID.String(),
+			"provider_settlement_id": req.ProviderEventId,
+			"settled_at":            now,
+		})
+		if settleErr != nil {
+			return nil, status.Errorf(codes.Internal, "build settled event: %v", settleErr)
+		}
+		settleEnv.CausationID = req.ProviderEventId
+		settleEnv.CorrelationID = topup.PalantirRef
+		if _, settleErr = outbox.Enqueue(ctx, tx, "palantir", "donation", topup.SarumanDonationID, &topup.StreamerID, settleEnv); settleErr != nil {
+			return nil, status.Errorf(codes.Internal, "enqueue settled event: %v", settleErr)
+		}
+	}
 	if err := repo.MarkWebhookProcessed(ctx, tx, webhookID); err != nil {
 		return nil, status.Errorf(codes.Internal, "mark webhook processed: %v", err)
 	}

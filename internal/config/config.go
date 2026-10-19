@@ -22,6 +22,13 @@ type Config struct {
 	DefaultProv   string // "pivot" | "midtrans"
 	ProviderStubs map[string]string
 	ShutdownGrace time.Duration
+	// Dev-only autosettle flags. DEFAULT ON for the dev stack, MUST be
+	// turned off in production: the pivot stub holds no provider state, so
+	// these short circuits are what close the dev top-up settlement (D-052)
+	// and the dev payout loop (T13). Production traffic goes through real
+	// provider webhooks and the D-055 status probe instead.
+	DevTopupAutosettle      bool
+	DevWithdrawalAutosettle bool
 }
 
 // Load reads the configuration from os.Getenv, applies defaults, and returns
@@ -41,6 +48,10 @@ func Load() (Config, error) {
 		MidtransEnv:   getenv("MIDTRANS_ENV", "sandbox"),
 		DefaultProv:   getenv("PROVIDER_DEFAULT", "pivot"),
 		ShutdownGrace: parseDuration("SHUTDOWN_GRACE_SECONDS", 15*time.Second),
+		// Dev defaults; PIVOT_*_AUTOSETTLE=false restores webhook/status-probe
+		// semantics (set explicitly in production).
+		DevTopupAutosettle:      getenvBool("DEV_TOPUP_AUTOSETTLE", true),
+		DevWithdrawalAutosettle: getenvBool("PIVOT_WITHDRAWAL_AUTOSETTLE", true),
 	}
 	if cfg.EngineAPIKey == "" {
 		return Config{}, fmt.Errorf("config: SM_GATEWAY_ENGINE_API_KEY is required")
@@ -71,4 +82,16 @@ func parseDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func getenvBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }

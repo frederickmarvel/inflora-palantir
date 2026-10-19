@@ -30,6 +30,9 @@ type TopUpServer struct {
 	Provider     provider.Provider
 	ProviderName string
 	Repo         *repo.GatewayTopUpRepo
+	// DevTopupAutosettle emits pg.gateway.topup.settled.v1 alongside the
+	// completed event for pivot captures (D-052, dev-only). Set from config.
+	DevTopupAutosettle bool
 }
 
 // NewTopUpServer constructs a TopUpServer with its dependencies.

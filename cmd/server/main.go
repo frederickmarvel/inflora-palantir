@@ -29,6 +29,7 @@ import (
 	"github.com/frederickmarvel/inflora-shared/provider/pivot"
 
 	"github.com/frederickmarvel/inflora-palantir/internal/config"
+	palantirevents "github.com/frederickmarvel/inflora-palantir/internal/events"
 	palantirgrpc "github.com/frederickmarvel/inflora-palantir/internal/grpc"
 	"github.com/frederickmarvel/inflora-palantir/internal/repo"
 	pb "github.com/frederickmarvel/inflora-shared/gen/go/palantir/v1"
@@ -61,15 +62,24 @@ func main() {
 	prov, providerName := buildProvider(cfg, logger)
 	repoGateway := repo.NewGatewayTopUpRepo(database)
 	topUp := palantirgrpc.NewTopUpServer(database, prov, providerName, repoGateway)
+	topUp.DevTopupAutosettle = cfg.DevTopupAutosettle
 	adminSrv := palantirgrpc.NewAdminServer(database, prov, providerName, repoGateway)
+	repoWithdrawal := repo.NewGatewayWithdrawalRepo(database)
+	withdrawal := palantirgrpc.NewWithdrawalServer(database, prov, providerName, repoWithdrawal, cfg.DevWithdrawalAutosettle)
 	if cfg.NATS.URL == "" {
 		logger.Fatal("NATS_URL is required")
 	}
-	publisher, err := events.NewNATSPublisher(events.NATSConfig{URL: cfg.NATS.URL, Name: cfg.ServiceName, Stream: cfg.NATS.StreamName, Subjects: []string{">"}})
+	natsConfig := events.NATSConfig{URL: cfg.NATS.URL, Name: cfg.ServiceName, Stream: cfg.NATS.StreamName, Subjects: []string{">"}, AckWait: cfg.NATS.AckWait, MaxDeliver: cfg.NATS.MaxDeliver}
+	publisher, err := events.NewNATSPublisher(natsConfig)
 	if err != nil {
 		logger.Fatal("connect nats", zap.Error(err))
 	}
 	defer func() { _ = publisher.Close() }()
+	natsSubscriber, err := events.NewNATSSubscriber(natsConfig)
+	if err != nil {
+		logger.Fatal("connect nats subscriber", zap.Error(err))
+	}
+	defer func() { _ = natsSubscriber.Close() }()
 	dispatcher, err := outbox.NewDispatcher(database, publisher, outbox.DispatcherConfig{WorkerName: "palantir-outbox", Producer: "palantir"})
 	if err != nil {
 		logger.Fatal("configure outbox", zap.Error(err))
@@ -85,11 +95,13 @@ func main() {
 	)
 	pb.RegisterTopUpServiceServer(gsrv, topUp)
 	pb.RegisterAdminServiceServer(gsrv, adminSrv)
+	pb.RegisterWithdrawalServiceServer(gsrv, withdrawal)
 	pb.RegisterHealthServiceServer(gsrv, palantirgrpc.NewHealthServer())
 	logger.Info("palantir listening", zap.String("addr", cfg.GRPCAddr), zap.String("version", cfg.Version), zap.String("default_provider", cfg.DefaultProv))
 	probe := func(context.Context) (bool, error) { return database.PingContext(context.Background()) == nil, nil }
 	worker := &grpcServer{lis: lis, gsrv: gsrv, logger: logger, grace: cfg.ShutdownGrace}
-	err = sharedruntime.Run(ctx, 5*time.Second, cfg.ShutdownGrace, probe, worker, dispatcher)
+	withdrawalWorker := &palantirevents.WithdrawalWorker{Subscriber: natsSubscriber, Server: withdrawal}
+	err = sharedruntime.Run(ctx, 5*time.Second, cfg.ShutdownGrace, probe, worker, dispatcher, withdrawalWorker)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("shutdown", zap.Error(err))
 	}
