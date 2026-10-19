@@ -1,5 +1,5 @@
 // Package events hosts Palantir's durable inbox consumer: the
-// 'palantir.payout-requested' subscription turns Saruman's payout.requested.v1
+// 'palantir-payout-requested' subscription turns Saruman's payout.requested.v1
 // events into provider withdrawal creation (T16).
 package events
 
@@ -16,7 +16,10 @@ import (
 
 const (
 	payoutRequestedSubject = "payout.requested.v1.>"
-	payoutRequestedDurable = "palantir.payout-requested"
+	// Durable names are NATS consumer names: dots are invalid there (the
+	// original 'palantir.payout-requested' failed subscription with
+	// "nats: invalid consumer name"), so it is dash-separated.
+	payoutRequestedDurable = "palantir-payout-requested"
 )
 
 // WithdrawalWorker consumes payout.requested.v1 and executes provider
