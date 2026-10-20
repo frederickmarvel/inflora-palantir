@@ -61,6 +61,21 @@ func (s *TopUpServer) CreateTopUp(ctx context.Context, req *pb.CreateTopUpReques
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid streamer_id: %v", err)
 	}
+	// D-061 (modular MDR): ingest snapshots the gateway fee + gross at intent
+	// creation and propagates them here. Zero-valued fields keep legacy
+	// behavior (gross falls back to amount).
+	if req.MdrIdr < 0 || req.GrossChargedIdr < 0 {
+		return nil, status.Error(codes.InvalidArgument, "mdr_idr and gross_charged_idr must be >= 0")
+	}
+	if req.GrossChargedIdr > 0 && req.GrossChargedIdr != req.AmountIdr+req.MdrIdr {
+		return nil, status.Error(codes.InvalidArgument,
+			"gross_charged_idr must equal amount_idr + mdr_idr")
+	}
+	mdrIDR := req.MdrIdr
+	grossIDR := req.GrossChargedIdr
+	if grossIDR == 0 {
+		grossIDR = req.AmountIdr
+	}
 	if req.IdempotencyKey == "" {
 		req.IdempotencyKey = keys.PalantirTopUpKey(req.SarumanDonationId)
 	}
@@ -98,10 +113,11 @@ func (s *TopUpServer) CreateTopUp(ctx context.Context, req *pb.CreateTopUpReques
 	if !errors.Is(err, repo.ErrNotFound) {
 		return nil, status.Errorf(codes.Internal, "lookup gateway: %v", err)
 	}
-	// 2. Call provider (Pivot by default) for the payment URL.
+	// 2. Call provider (Pivot by default) for the payment URL. The donor is
+	// charged the gross amount (amount + MDR, D-061); MDR is donor-borne.
 	res, err := s.Provider.CreateTopUp(ctx, provider.CreateTopUpRequest{
 		ExternalID:    req.SarumanDonationId,
-		AmountIDR:     req.AmountIdr,
+		AmountIDR:     grossIDR,
 		PaymentMethod: provider.QRIS, // MVP: all top-ups use QRIS for now.
 		DonorName:     req.DonorDisplayName,
 		RequestID:     ref,
@@ -115,8 +131,8 @@ func (s *TopUpServer) CreateTopUp(ctx context.Context, req *pb.CreateTopUpReques
 		SarumanDonationID: donationID,
 		StreamerID:        streamerID,
 		AmountIDR:         req.AmountIdr,
-		MDRIDR:            0,
-		GrossChargedIDR:   req.AmountIdr,
+		MDRIDR:            mdrIDR,
+		GrossChargedIDR:   grossIDR,
 		ProviderName:      s.ProviderName,
 		ProviderRequestID: ref,
 		RequestHash:       requestHash,
@@ -141,7 +157,7 @@ func (s *TopUpServer) CreateTopUp(ctx context.Context, req *pb.CreateTopUpReques
 }
 
 func topUpRequestHash(req *pb.CreateTopUpRequest) string {
-	raw := fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%s", req.SarumanDonationId, req.StreamerId, req.AmountIdr, req.Currency, req.DonorDisplayName)
+	raw := fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%s\x00%d\x00%d", req.SarumanDonationId, req.StreamerId, req.AmountIdr, req.Currency, req.DonorDisplayName, req.MdrIdr, req.GrossChargedIdr)
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
 }
